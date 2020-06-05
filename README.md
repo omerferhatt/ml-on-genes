@@ -1,6 +1,6 @@
 ## Disease class prediction with using genetic micro-array data
 
-####Objective
+#### Objective
 
 The purpose of this project is to develop a method that uses genetic data for disease
 classification. Data is extracted from a DNA microarray which
