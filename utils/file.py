@@ -3,16 +3,7 @@ import glob
 import os
 
 
-# Reading txt files to get class list
-def read_cls_txt(path):
-    f = open(path, "r")
-    if f.mode == 'r':
-        contents = f.read()
-        # Separate new-lines
-        return contents.split(sep="\n")[1:-1]
-
-
-def get_fp_dict(path):
+def get_file_paths(path):
     # Creates file path dict. Searches for "train", "test" and "class" substrings.
     files = glob.glob(os.path.join(path, '*.*'))
     # Creating empty file dictionary to hold all required file paths in it.

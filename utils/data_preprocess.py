@@ -1,106 +1,168 @@
-# Main libraries to manipulate arrays and reading data files
 import os
-from datetime import datetime
 import numpy as np
 import pandas as pd
-# Library imports for file handling
-from tqdm import trange
-# Importing machine learning framework
 from sklearn.preprocessing import LabelEncoder
 from scipy.stats import ttest_ind
-# Importing custom user libraries
-from utils.file import get_fp_dict, read_cls_txt
+from utils.file import get_file_paths
 
 
 class DataPreprocess:
-    def __init__(self, data_path, top_gen=(2, 4, 6, 8, 10, 12, 15, 20, 25, 30)):
-        self.data_dir = data_path
-        self.top_gen_pair = top_gen
-        self.file_paths = get_fp_dict(self.data_dir)
-        self.classes = read_cls_txt(self.file_paths['class'])
-        self.data = self.read_data()
+    def __init__(self, data_dir: str, top_n_gene: list, gene_limit):
+        # Data folder path which includes train-test dataset and class file
+        self.data_dir = data_dir
+        self.top_n_gene = top_n_gene
+        self.gene_limit = gene_limit
+        # Getting file names to dict and accessing them just typing name of file eg. 'train', 'test'
+        self.file_paths = get_file_paths(self.data_dir)
+        # Read train-test datasets and class file
+        self.train, self.test = self.read_data()
+        self.classes, self.encoder = self.read_classes()
 
-        self.top_gen_index, self.top_gen_index_df = self.get_top_gen_index()
+        self.t_test_result = self.data_preprocess()
+        self.top_n_values, self.top_n_class = self.get_top_n()
+        self.save_top_n()
+
+    def data_preprocess(self):
+        self.remove_fold_data(5)
+        self.threshold_data()
+        self.remove_low_variance()
+        return self.calculate_t(save_df=True)
 
     def read_data(self):
-        train = pd.read_csv(self.file_paths['train']).to_numpy().T[1:, :100]
-        test = pd.read_csv(self.file_paths['test']).to_numpy().T[1:, :100]
-        return {"train": train, "test": test}
+        # Reading train and test csv files and converting them into numpy
+        # For now only selecting first 100 genes. It helps working faster for further steps
+        if self.gene_limit is None:
+            train = pd.read_csv(self.file_paths['train']).to_numpy().T[:, :]
+            test = pd.read_csv(self.file_paths['test']).to_numpy().T[:, :]
+        else:
+            train = pd.read_csv(self.file_paths['train']).to_numpy().T[:, :self.gene_limit]
+            test = pd.read_csv(self.file_paths['test']).to_numpy().T[:, :self.gene_limit]
+        return train, test
 
-    def get_top_gen_index(self):
-        encoder, encoded_class = self._encode_label(self.classes)
-        threshold_data = self._threshold_genes(self.data)
-        ttest_res = self._calculate_t(threshold_data['train'], encoded_class)
-        top_gen_pair = self._get_top_gen_pairs(ttest_res, self.top_gen_pair)
-        top_gen_index = self._encode_pairs(ttest_res, top_gen_pair)
-        top_gen_index_df = self._create_top_gen_df(top_gen_index, encoder, self.classes)
-        return top_gen_index, top_gen_index_df
-
-    def save_top_gen(self):
-        now = datetime.now()
-        date_time = now.strftime("%m_%d_%y_%H_%M_%S")
-        file_path = os.path.join(self.data_dir, f"pp5i_train.topN.gr.{date_time}.csv")
-        self.top_gen_index_df.to_csv(file_path)
-
-    @staticmethod
-    def _encode_label(arr):
+    def read_classes(self):
+        # Open txt file as read mode
+        file = open(self.file_paths['class'], "r")
+        # Reading file contents as a list
+        contents = file.read()
+        # Separate new-lines
+        classes = contents.split(sep="\n")[1:-1]
+        # Creating encoder for classes
         le = LabelEncoder()
-        arr = le.fit_transform(arr)
-        return le, arr
+        # Fit all patient classes into label encoder and save them in new variable
+        encoded = le.fit_transform(classes)
+        return encoded, le
 
-    @staticmethod
-    def _threshold_genes(arr):
-        for d in list(arr.values()):
-            for row in range(d.shape[0]):
-                for col in range(d.shape[1]):
-                    if d[row, col] < 20 or d[row, col] > 16000:
-                        d[row, col] = 0
-        return arr
+    def remove_fold_data(self, fold_n):
+        # Loop over genes with all samples to find the index of genes that do not have enough fold
+        genes_to_delete = [idx for idx, genes_row in enumerate(self.train.T)
+                           if np.max(genes_row[1:]) < fold_n * np.min(genes_row[1:])]
 
-    @staticmethod
-    def _calculate_t(arr, classes):
-        t_res = []
-        for cls in trange(np.max(classes)+1, desc="Classes"):
-            sub_class = []
-            samp = np.where(classes == cls)[0]
-            for gene in trange(arr.shape[1], desc=f"Genes in class {cls}"):
-                for other_gene in range(gene + 1, arr.shape[1]):
-                    t_val, p_val = ttest_ind(arr[samp, gene], arr[samp, other_gene])
-                    sub_class.append((gene, other_gene, (t_val, p_val)))
-            t_res.append(sub_class)
-        return np.array(t_res)
+        # Delete gene columns from training and test data
+        self.train = np.delete(self.train, genes_to_delete, 1)
+        self.test = np.delete(self.test, genes_to_delete, 1)
 
-    @staticmethod
-    def _get_top_gen_pairs(t_res, top_list):
-        main_list = {}
-        for t in top_list:
-            tot_cls = []
-            for cls in t_res:
-                cls_list = []
-                for ind, (t_val, p_val) in enumerate(cls[:, 2][:]):
-                    if p_val < 0.005:
-                        cls_list.append([np.abs(t_val), ind])
-                cls_list = np.array(cls_list)
-                cls_list = cls_list[cls_list[:, 0].argsort()]
-                tot_cls.append(cls_list[-t:])
-            main_list[t] = tot_cls
-        return main_list
+    def remove_low_variance(self):
+        # Loop over genes with all samples to find the index of genes that do not have enough fold
+        genes_to_delete = [idx for idx, genes_row in enumerate(self.train.T)
+                           if np.std(genes_row[1:]) < 10]
 
-    @staticmethod
-    def _encode_pairs(ttest_res, top_dict):
-        top_gen_list = []
-        for top, keys in zip(list(top_dict.values()), list(top_dict.keys())):
-            gen_ind = []
-            for cls_top, cls_res in zip(top, ttest_res):
-                temp_list = []
-                for pairs in cls_top[:, 1]:
-                    temp_list.append(np.array(cls_res[int(pairs), [0, 1]]))
-                gen_ind.append(list(set(list(np.array(temp_list).reshape(1, -1)[0]))))
-            top_gen_list.append(gen_ind)
-        return np.array(top_gen_list)
+        # Delete gene columns from training and test data
+        self.train = np.delete(self.train, genes_to_delete, 1)
+        self.test = np.delete(self.test, genes_to_delete, 1)
 
-    def _create_top_gen_df(self, top_gen, enc, classes):
-        rows = enc.inverse_transform(np.arange(top_gen.shape[1]))
-        cols = [f"Top gen from {pair} pair" for pair in self.top_gen_pair]
-        df = pd.DataFrame(data=top_gen.T, index=rows, columns=cols)
-        return df
+    def threshold_data(self):
+        # Loop over genes with all samples to find the index of genes that do not have enough fold
+        genes_to_delete = [idx for idx, genes_row in enumerate(self.train.T)
+                           if np.max(genes_row[1:]) < 20 or np.min(genes_row[1:]) > 12000]
+
+        # Delete gene columns from training and test data
+        self.train = np.delete(self.train, genes_to_delete, 1)
+        self.test = np.delete(self.test, genes_to_delete, 1)
+
+    def calculate_t(self, save_df=False):
+        # Placeholder for all class individual t test result
+        total_t_result = []
+        print(f'T-test Started on {len(set(self.classes))} class with {self.train.shape[1]} genes.\n')
+        # Loop over all classes
+        for cls in range(len(set(self.classes))):
+            print(f'T-test on Class: {self.encoder.inverse_transform((cls,))[0]}')
+            # Append class-based results in other list
+            cls_t_result = []
+            # Get indices of classes
+            samp = np.where(self.classes == cls)[0] + 1
+            # Take the first gene for t test
+            for gene_0 in range(self.train.shape[1]):
+                # Calculate t and p values when testing with all the remaining genes
+                for gene_1 in range(gene_0 + 1, self.train.shape[1]):
+                    t_value, p_value = ttest_ind(self.train[samp, gene_0], self.train[samp, gene_1])
+                    cls_t_result.append((self.encoder.inverse_transform((cls,))[0],
+                                         self.train[0, gene_0], gene_0, self.train[0, gene_1], gene_1,
+                                         t_value, p_value))
+            total_t_result.append(cls_t_result)
+
+        # If desired, save these results in an additional file
+        if save_df:
+            path = os.path.join(self.data_dir, "pp5i_t_result.gr.csv")
+            cols = ['Class', 'Gene 1', 'Indices of Gene 1', 'Gene 2', 'Indices of Gene 2', 't-value', 'p-value']
+            data = np.squeeze(np.array(total_t_result).reshape((1, -1, 7)))
+            df = pd.DataFrame(data, columns=cols)
+            df.to_csv(path, index=False)
+        print('\nT-test completed!')
+        return np.array(total_t_result)
+
+    def get_top_n(self):
+        # Placeholder for top-n genes and their values
+        top_n_values = {}
+        top_n_genes = {}
+        for n in self.top_n_gene:
+            # Placeholder for top genes in max n gene
+            n_train_list = []
+            n_class_list = []
+            # Loop over results and classes
+            for encoded_class, cls_t_result in enumerate(self.t_test_result):
+                indice_list = []
+                cls_t_result = np.array(sorted(cls_t_result, key=lambda x: np.abs(float(x[5])), reverse=True))
+                for ind_0, ind_1 in cls_t_result[:, [2, 4]]:
+                    if ind_0 not in indice_list:
+                        indice_list.append(int(ind_0))
+                    if len(indice_list) == n:
+                        break
+                    if ind_1 not in indice_list:
+                        indice_list.append(int(ind_1))
+                    if len(indice_list) == n:
+                        break
+
+                samples = np.where(self.classes == encoded_class)[0] + 1
+                n_train_list.append(self.train[np.min(samples):np.max(samples) + 1, indice_list])
+                indice_list = list(self.train[0, indice_list])
+                indice_list.append(self.encoder.inverse_transform((encoded_class,))[0])
+                n_class_list.append(indice_list)
+            n_class_list = np.array(n_class_list)
+            n_train_list = np.concatenate(n_train_list, axis=0)
+            n_train_list = np.concatenate((n_train_list, self.encoder.inverse_transform(np.sort(self.classes)).reshape((-1, 1))),
+                                          axis=1)
+
+            top_n_values[n] = (n_train_list)
+            top_n_genes[n] = (n_class_list)
+
+        return top_n_values, top_n_genes
+
+    def save_top_n(self):
+        save_dir = os.path.join(self.data_dir, "top_n")
+        if not os.path.exists(save_dir):
+            os.rmdir(save_dir)
+            os.mkdir(save_dir)
+        for n, (n_values, n_genes) in enumerate(zip(self.top_n_values.values(), self.top_n_class.values())):
+            cols = [f'Gene: {cnt}' for cnt in range(self.top_n_gene[n])]
+            cols.append('Class')
+            df_values = pd.DataFrame(n_values, columns=cols)
+            path = os.path.join(save_dir, f"pp5i_train.top{self.top_n_gene[n]}.values.gr.csv")
+            df_values.to_csv(path, index=False)
+            df_genes = pd.DataFrame(n_genes, columns=cols)
+            path = os.path.join(save_dir, f"pp5i_train.top{self.top_n_gene[n]}.genes.gr.csv")
+            df_genes.to_csv(path, index=False)
+        print(f'Files saved to: {save_dir}')
+
+
+if __name__ == "__main__":
+    dp = DataPreprocess('data', [2, 4, 6, 8, 10, 15, 20, 25])
